@@ -25,40 +25,58 @@ typedef struct tel_entry_t {
     char number[MAX_LINE_LEN];
 } TelEntry;
 
-// Define which characters should be skipped in t9match_string().
+// Define which characters should be skipped in t9match_string_sep().
 typedef uint64_t SkipMask;
 
-// Store result details from is_similiar() function.
+// Store result details from is_similiar_sep() function.
 typedef struct similiar_result_t {
     int mistakes;
     SkipMask mask;
     const char* p_filter;
 } SimiliarResult;
 
-// Parse arguments from command line and return parse success status.
-bool parse_arguments(int argc, char** argv, char* out_filter, int* out_lev);
+// We use these to choose between different implementations, depending on the '-s' parameter.
+typedef bool (*SimFun)(const char*, const char*, const char*, int, SimiliarResult*);
+typedef bool (*T9MatchFun)(const char*, const char*, SkipMask);
 
+
+// Parse arguments from command line and return parse success status.
+bool parse_arguments(int argc, char** argv, char* out_filter, int* out_lev, bool* out_sep);
 // Just print usage to stderr.
 void print_usage(const char* program_name);
-
 // Print all matches from stdin and if none are found, print all similiar matches according
 // to the lev (maximum edit distance).
-int print_matches_from_stdin(const char* filter, int lev);
-
+int print_matches_from_stdin(const char* filter, int lev, T9MatchFun is_match_fun, SimFun is_similiar_fun);
 // Print entry with required format.
 void print_entry(const TelEntry* t) { printf("%s, %s\n", t->name, t->number); }
 void print_entry_similiar(const TelEntry* t, const SimiliarResult* r);
+// Try to match given T9 filter to string. We assume, that there can be any number of
+// characters between two matches.
+// Using skip_mask we can flag which characters in filter should be skipped.
+bool t9match_string_sep(const char* filter, const char* s, SkipMask skip_mask);
+// Check if filter is substring of s.
+bool t9match_string(const char* filter, const char* s, SkipMask skip_mask);
+// We remove all combinations of up to 'lev' filter characters and check if the resulting filter matches.
+// Only removal is needed because we assume any number of characters can be between matches. Than means:
+//   - There cannot be a missing character. 
+//   - Extra character is the same thing as wrong character => we just remove them. 
+bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res);
+// Check if entry is similiar using https://en.wikipedia.org/wiki/Wagner%E2%80%93Fischer_algorithm.
+bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res) { (void)filter; (void)name_num; (void)num_num; (void)lev; (void)res; perr("is_similiar(): Not implemented yet\n"); return false; }
 
 int main(int argc, char* argv[])
 {
     int lev = 0;
+    bool separated = false;     // Find matches with any number of characters between matches.
     char filter[MAX_FILTER_LEN];
-    if (!parse_arguments(argc, argv, filter, &lev))
+    if (!parse_arguments(argc, argv, filter, &lev, &separated))
         return EXIT_FAILURE;
 
-    if (print_matches_from_stdin(filter, lev) == 0) {
-        printf("Not found.\n");
-        return EXIT_FAILURE;
+    SimFun sim_fun = separated ? &is_similiar_sep : &is_similiar;
+    T9MatchFun match_fun = separated ? &t9match_string_sep : &t9match_string;
+
+    if (print_matches_from_stdin(filter, lev, match_fun, sim_fun) == 0) {
+        printf("Not found\n");
     }
 
   return EXIT_SUCCESS;
@@ -89,7 +107,8 @@ void to_t9number(const char* str, char* out_num, int max_len)
     {
         const char* skip_chars = " .,:";
         if (strchr(skip_chars, str[i])) {
-            offset--;
+            // offset--;
+            out_num[i] = ' ';
             continue;
         }
         // Save converted as well as check if it was converted successfully.
@@ -112,10 +131,15 @@ void correct_line(char* str)
     }
 } 
 
-// Try to match given T9 filter to string. We assume, that there can be any number of
-// characters between two matches.
-// Using skip_mask we can flag which characters in filter should be skipped.
 bool t9match_string(const char* filter, const char* s, SkipMask skip_mask)
+{
+    if (strcmp(filter, ANY_FILTER) == 0)
+        return true;
+
+    (void)skip_mask;
+    return strstr(s, filter) != NULL;
+} 
+bool t9match_string_sep(const char* filter, const char* s, SkipMask skip_mask)
 {
     if (strcmp(filter, ANY_FILTER) == 0)
         return true;
@@ -148,11 +172,7 @@ SkipMask get_next_bit_permutation(SkipMask v)
   return (t + 1) | (((~t & -~t) - 1) >> (__builtin_ctz(v) + 1));
 }
 
-// We remove all combinations of up to 'lev' filter characters and check if the resulting filter matches.
-// Only removal is needed because we assume any number of characters can be between matches. Than means:
-//   - There cannot be a missing character. 
-//   - Extra character is the same thing as wrong character => we just remove them. 
-bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
+bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
 {
     int filter_len = strlen(filter);
     if (filter_len > MAX_FILTER_LEN) {
@@ -168,7 +188,7 @@ bool is_similiar(const char* filter, const char* name_num, const char* num_num, 
         while(!(current_permutation & (1 << filter_len)))
         {
             // Check for match with filter with given skip mask.
-            if (t9match_string(filter, name_num, current_permutation) || t9match_string(filter, num_num, current_permutation)) {
+            if (t9match_string_sep(filter, name_num, current_permutation) || t9match_string_sep(filter, num_num, current_permutation)) {
                 if (res != NULL) {
                     res->mask = current_permutation;
                     res->mistakes = mistakes;
@@ -206,44 +226,54 @@ void print_entry_similiar(const TelEntry* t, const SimiliarResult* r)
     printf("      matching filter: ");
     print_filter(r->p_filter, r->mask);
 } 
-int print_matches_from_stdin(const char* filter, int lev)
+int get_entry_from_stdin(TelEntry* out)
+{
+    // Get name from stdin. If name was not read, then we have reached end of file or blank line.
+    if (fgets(out->name, MAX_LINE_LEN, stdin) == NULL || strlen(out->name) == 1)
+        return -1;
+    correct_line(out->name);
+
+    // Get number from stdin.
+    if (fgets(out->number, MAX_LINE_LEN, stdin) == NULL) {
+        perr("error: Contact is missing number! Name: %s\n", out->name);
+        return -1;
+    }
+    correct_line(out->number);
+
+    return 0;
+}
+// Convert name and number to T9 strings.
+void entry_to_t9entry(const TelEntry* entry, TelEntry* out)
+{
+    memset(out->name, 0, MAX_LINE_LEN);
+    to_t9number(entry->name, out->name, MAX_LINE_LEN);
+    memset(out->number, 0, MAX_LINE_LEN);
+    to_t9number(entry->number, out->number, MAX_LINE_LEN);
+}
+int print_matches_from_stdin(const char* filter, int lev, T9MatchFun is_match_fun, SimFun is_similiar_fun)
 {
     // We store a limited number of similiar results, as we print them only after we cannot find any match.
     static TelEntry sim_buf[MAX_SIM_ENTRIES];
     static SimiliarResult sim_res_buf[MAX_SIM_ENTRIES];
     int n_sim = 0;
 
+    TelEntry t9_entry;
     int n_printed = 0;
-    static char name_buf[MAX_LINE_LEN];
-    static char num_buf[MAX_LINE_LEN];     // We convert number as well, because it can contain '+' character.
     while (true) 
     {
         TelEntry t;
-
-        // Get name from stdin. If name was not read, then we have reached end of file or blank line.
-        if (fgets(t.name, MAX_LINE_LEN, stdin) == NULL || strlen(t.name) == 1)
+        if (get_entry_from_stdin(&t) != 0)
             break;
-        correct_line(t.name);
-
-        // Get number from stdin.
-        if (fgets(t.number, MAX_LINE_LEN, stdin) == NULL) {
-            perr("error: Contact is missing number! Name: %s\n", t.name);
-            return n_printed;
-        }
-        correct_line(t.number);
-
-        // Convert name and number to T9 strings.
-        memset(name_buf, 0, MAX_LINE_LEN);
-        to_t9number(t.name, name_buf, MAX_LINE_LEN);
-        memset(num_buf, 0, MAX_LINE_LEN);
-        to_t9number(t.number, num_buf, MAX_LINE_LEN);
-
+        
+        // Get entry in T9 format.
+        entry_to_t9entry(&t, &t9_entry);
+        
         // Print entry if it matches the current filter.
         SimiliarResult r;
-        if (t9match_string(filter, name_buf, TRY_ALL) || t9match_string(filter, num_buf, TRY_ALL)) {
+        if (is_match_fun(filter, t9_entry.name, TRY_ALL) || is_match_fun(filter, t9_entry.number, TRY_ALL)) {
             print_entry(&t);
             n_printed++;
-        } else if (n_printed < 1 && lev > 0 && n_sim < MAX_SIM_ENTRIES && is_similiar(filter, name_buf, num_buf, lev, &r)) {
+        } else if (n_printed < 1 && lev > 0 && n_sim < MAX_SIM_ENTRIES && is_similiar_fun(filter, t9_entry.name, t9_entry.number, lev, &r)) {
             sim_buf[n_sim] = t;
             sim_res_buf[n_sim++] = r;
         }
@@ -267,7 +297,7 @@ void print_usage(const char* program_name)
     perr("    - stdin should contain newline separated list of name and numbers\n");
     perr("-l    Maximum number of mistakes allowed\n");
 }
-bool parse_arguments(int argc, char** argv, char* filter, int* lev)
+bool parse_arguments(int argc, char** argv, char* filter, int* lev, bool* out_sep)
 {
     // By default the filter is ANY_FILTER
     // If more than 1 arguments are passed then print usage.
@@ -290,6 +320,8 @@ bool parse_arguments(int argc, char** argv, char* filter, int* lev)
 
         if (strcmp(argv[i], "-l") == 0)
             lev_arg = true;
+        else if (strcmp(argv[i], "-s") == 0)
+            *out_sep = true;
         else if (strcmp(filter, ANY_FILTER) != 0)
             break;
         else {
