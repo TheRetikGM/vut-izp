@@ -18,7 +18,7 @@
         "request": "launch",
         "program": "${workspaceRoot}/t9search",
         "cwd": "${workspaceRoot}",
-        "args": [ "686", "<", "seznam.txt" ]
+        "args": [ "202", "-l", "2", "<", "seznam.txt" ]
       }
     }
   }

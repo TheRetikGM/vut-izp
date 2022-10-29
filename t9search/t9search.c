@@ -61,16 +61,18 @@ bool t9match_string(const char* filter, const char* s, SkipMask skip_mask);
 //   - There cannot be a missing character. 
 //   - Extra character is the same thing as wrong character => we just remove them. 
 bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res);
-// Check if entry is similiar using https://en.wikipedia.org/wiki/Wagner%E2%80%93Fischer_algorithm.
-bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res) { (void)filter; (void)name_num; (void)num_num; (void)lev; (void)res; perr("is_similiar(): Not implemented yet\n"); return false; }
+// Check https://en.wikipedia.org/wiki/Levenshtein_distance. Algorithm used is iterative with two matrixes.
+bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res);
 
 int main(int argc, char* argv[])
 {
     int lev = 0;
     bool separated = false;     // Find matches with any number of characters between matches.
     char filter[MAX_FILTER_LEN];
-    if (!parse_arguments(argc, argv, filter, &lev, &separated))
+    if (!parse_arguments(argc, argv, filter, &lev, &separated)) {
+        print_usage(argv[0]);
         return EXIT_FAILURE;
+    }
 
     SimFun sim_fun = separated ? &is_similiar_sep : &is_similiar;
     T9MatchFun match_fun = separated ? &t9match_string_sep : &t9match_string;
@@ -102,19 +104,10 @@ char to_lower(char c)
 // Special characters such as space and dot are skipped.
 void to_t9number(const char* str, char* out_num, int max_len)
 {
-    int offset = 0;
     for (int i = 0; str[i] && i < max_len; i++)
-    {
-        const char* skip_chars = " .,:";
-        if (strchr(skip_chars, str[i])) {
-            // offset--;
-            out_num[i] = ' ';
-            continue;
-        }
         // Save converted as well as check if it was converted successfully.
-        if ((out_num[i + offset] = get_t9number(to_lower(str[i]))) == 0)
-            perr("Unable to convert '%c' to number with T9\n", str[i]);
-    }
+        if ((out_num[i] = get_t9number(to_lower(str[i]))) == 0)
+            out_num[i] = str[i];
 }
 
 // Correct the read line: Remove trailing newline and make sure, entire line (from stdin) was read.
@@ -172,6 +165,57 @@ SkipMask get_next_bit_permutation(SkipMask v)
   return (t + 1) | (((~t & -~t) - 1) >> (__builtin_ctz(v) + 1));
 }
 
+int min3(int a, int b, int c)
+{
+    int min = a;
+    if (b < min)
+        min = b;
+    if (c < min)
+        min = c;
+    return min;
+}
+int min2(int a, int b) { return a < b ? a : b;}
+int get_edit_distance(const char* s1, const char* s2)
+{
+	// Maxmimum length of the string + 1 space for 0.
+	static int distances[MAX_LINE_LEN + 1][MAX_LINE_LEN + 1] = {};
+	int len1 = strlen(s1);
+	int len2 = strlen(s2);
+
+	for (int i = 1; i <= len1; i++)
+		distances[i][0] = i;
+	for (int j = 1; j <= len2; j++)
+		distances[0][j] = j;
+
+	int sub_cost = 0;
+	for (int j = 1; j <= len2; j++)
+	{
+		for (int i = 1; i <= len1; i++)
+		{
+			sub_cost = (int)(s1[i - 1] != s2[j - 1]);
+			distances[i][j] = min3(
+			        distances[i - 1][j] + 1, // Deletion.
+			        distances[i][j - 1] + 1, // Insertion.
+			        distances[i - 1][j - 1] + sub_cost); // Substitution.
+		}
+	}
+
+	return distances[len1][len2];
+}
+bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
+{
+    int lev1 = get_edit_distance(filter, name_num);
+    int lev2 = get_edit_distance(filter, num_num);
+    int min_lev = min2(lev1, lev2);
+    
+    if (min_lev > lev)
+        return false;
+    res->mistakes = min2(lev1, lev2);
+    res->p_filter = filter;
+    res->mask = 0;
+
+    return true;
+}
 bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
 {
     int filter_len = strlen(filter);
@@ -292,10 +336,19 @@ void print_usage(const char* program_name)
 {
     perr("\n");
     perr("Search for telephone entry from STDIN using a T9 filter.\n");
-    perr("Usage: %s [filter][-l:]\n", program_name);
+    perr("Usage: %s [filter][-l:-s]\n", program_name);
     perr("    - filter is a sequence of numbers from 0-9\n");
     perr("    - stdin should contain newline separated list of name and numbers\n");
-    perr("-l    Maximum number of mistakes allowed\n");
+    perr("-l  - Maximum number of mistakes allowed\n");
+    perr("-s  - Search for entries, that have any number of characters between filter matches.\n");
+}
+// Fitler should only consist of numbers.
+bool is_number(const char* filter)
+{
+   for (int i = 0; filter[i] && i < MAX_FILTER_LEN; i++)
+       if (filter[i] < '0' || filter[i] > '9')
+           return false;
+   return true;
 }
 bool parse_arguments(int argc, char** argv, char* filter, int* lev, bool* out_sep)
 {
@@ -310,8 +363,8 @@ bool parse_arguments(int argc, char** argv, char* filter, int* lev, bool* out_se
         if (lev_arg) {
             *lev = (int)strtol(argv[i], NULL, 10);
 
-            if (*lev < 0) {
-                print_usage(argv[0]);
+            if (!is_number(argv[i]) || *lev < 0) {
+                perr("error: Lev must be a number greater than 0\n.");
                 return false;
             }
             lev_arg = false;
@@ -320,23 +373,36 @@ bool parse_arguments(int argc, char** argv, char* filter, int* lev, bool* out_se
 
         if (strcmp(argv[i], "-l") == 0)
             lev_arg = true;
-        else if (strcmp(argv[i], "-s") == 0)
+        else if (strcmp(argv[i], "-s") == 0) {
+            if (i != 1) {
+                perr("error: For some reason parameter -s must be the first parammeter.\n");
+                return false;
+            }
             *out_sep = true;
-        else if (strcmp(filter, ANY_FILTER) != 0)
-            break;
+        }
+        else if (strcmp(filter, ANY_FILTER) != 0) {
+            perr("error: Unexpected argument %s\n", argv[i]);
+            return false;
+        }
+        else if (is_number(argv[i]) == false) {
+            perr("error: Filter is in unexpected format.\n");
+            return false;
+        }
         else {
             if (strlen(argv[i]) >= MAX_FILTER_LEN) {
                 perr("error: filter length is too big. Maximum is: %i\n", MAX_FILTER_LEN);
-                print_usage(argv[0]);
                 return false;
             }
             strcpy(filter, argv[i]);
         }
     }
 
+    if (lev_arg) {
+        perr("error: Expected parameter for -l\n");
+        return false;
+    }
     if (*lev >= (int)strlen(filter)) {
         perr("error: Edit distance must not be >= than length of the T9 filter.\n");
-        print_usage(argv[0]);
         return false;
     }
 
