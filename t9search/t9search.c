@@ -38,7 +38,7 @@ typedef struct similiar_result_t {
 } SimiliarResult;
 
 // We use these to choose between different implementations, depending on the '-s' parameter.
-typedef bool (*SimFun)(const char*, const char*, const char*, int, SimiliarResult*);
+typedef bool (*SimFun)(const char*, const TelEntry* t, int, SimiliarResult*);
 typedef bool (*T9MatchFun)(const char*, const char*, SkipMask);
 
 
@@ -62,31 +62,32 @@ bool t9match_string(const char* filter, const char* s, SkipMask skip_mask);
 // Only removal is needed because we assume any number of characters can be between matches. Than means:
 //   - There cannot be a missing character. 
 //   - Extra character is the same thing as wrong character => we just remove them. 
-bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res);
-// Check https://en.wikipedia.org/wiki/Levenshtein_distance. Algorithm used is iterative with two matrixes.
-bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res);
+bool is_similiar_sep(const char* filter, const TelEntry* num_entry, int lev, SimiliarResult* res);
+// Implementation for instance without the -s paramter. Uses Bitap algorithm for fuzzy substring mathching.
+bool is_similiar(const char* filter, const TelEntry* num_entry, int lev, SimiliarResult* res);
 
 int main(int argc, char* argv[])
 {
     int lev = 0;
     bool separated = false;     // Find matches with any number of characters between matches.
     char filter[MAX_FILTER_LEN];
+
     if (!parse_arguments(argc, argv, filter, &lev, &separated)) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
+    // Choose different function implementations based on the -s parameter.
     SimFun sim_fun = separated ? &is_similiar_sep : &is_similiar;
     T9MatchFun match_fun = separated ? &t9match_string_sep : &t9match_string;
 
-    if (print_matches_from_stdin(filter, lev, match_fun, sim_fun) == 0) {
+    if (print_matches_from_stdin(filter, lev, match_fun, sim_fun) == 0)
         printf("Not found\n");
-    }
 
   return EXIT_SUCCESS;
 }
 
-// Get T9 number representing the current character.
+// Get T9 number representing the character.
 char get_t9number(char c)
 {
     const int MAP_SIZE = (int)sizeof(T9_MAP) / (int)sizeof(T9_MAP[0]);
@@ -112,7 +113,7 @@ void to_t9number(const char* str, char* out_num, int max_len)
             out_num[i] = str[i];
 }
 
-// Correct the read line: Remove trailing newline and make sure, entire line (from stdin) was read.
+// Correct the read line: Remove trailing newline and make sure that entire line (from stdin) was read.
 void correct_line(char* str)
 {
     int line_len = strlen(str);
@@ -131,9 +132,11 @@ bool t9match_string(const char* filter, const char* s, SkipMask skip_mask)
     if (strcmp(filter, ANY_FILTER) == 0)
         return true;
 
+    // Avoid unused argument warning.
     (void)skip_mask;
     return strstr(s, filter) != NULL;
 } 
+
 bool t9match_string_sep(const char* filter, const char* s, SkipMask skip_mask)
 {
     if (strcmp(filter, ANY_FILTER) == 0)
@@ -143,7 +146,7 @@ bool t9match_string_sep(const char* filter, const char* s, SkipMask skip_mask)
     int filter_len = strlen(filter);
     for (int i = 0; i < filter_len; i++)
     {
-        // If bit in mask is 1 then skip this filter character.
+        // If bit in mask (at this string index) is 1 then skip this filter character.
         if (skip_mask & (1 << (filter_len - i - 1)))
             continue;
 
@@ -160,14 +163,8 @@ bool t9match_string_sep(const char* filter, const char* s, SkipMask skip_mask)
     return true;
 }
 
-// See https://stackoverflow.com/questions/70155565/generate-a-list-of-binary-numbers-where-n-bits-are-set-to-1 for details.
-SkipMask get_next_bit_permutation(SkipMask v) 
-{
-  SkipMask t = v | (v - 1);
-  return (t + 1) | (((~t & -~t) - 1) >> (__builtin_ctz(v) + 1));
-}
-
-// https://en.wikipedia.org/wiki/Bitap_algorithm
+// Find fuzzy substring (pattern) in text with 'lev' mistakes or less. See https://en.wikipedia.org/wiki/Bitap_algorithm for more details.
+// Returns pointer to the mathing substring.
 const char* bitap_match(const char* text, const char* pattern, int lev)
 {
 	const char* result = NULL;
@@ -177,17 +174,17 @@ const char* bitap_match(const char* text, const char* pattern, int lev)
 	int i, d;
 
 	if (pattern[0] == '\0') 
-		return NULL;
-	if (m > 31)
-		return NULL; //Error: The pattern is too long!
+		return text;
+	if (m > 31) {
+	    perr("Pattern is too long!\n");
+		return NULL; 
+	}
 
 	memset(R, 0, MAX_EDIT_DIST * sizeof(unsigned long));
 	for (i = 0; i <= lev; ++i)
 		R[i] = ~1;
-
 	for (i = 0; i <= CHAR_MAX; ++i)
 		patternMask[i] = ~0;
-
 	for (i = 0; i < m; ++i)
 		patternMask[(int)pattern[i]] &= ~(1UL << i);
 
@@ -211,16 +208,25 @@ const char* bitap_match(const char* text, const char* pattern, int lev)
 	return result;
 }
 
-bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
+bool is_similiar(const char* filter, const TelEntry* num_entry, int lev, SimiliarResult* res)
 {
+    // We won't obtain any info about similiarity, so fill result with empty values and mark is as empty (by setting mistakes to -1).
     res->p_filter = filter;
     res->mask = 0;
     res->mistakes = -1;
-    if (!bitap_match(name_num, filter, lev) && !bitap_match(num_num, filter, lev))
-        return false;
-    return true;
+
+    return bitap_match(num_entry->name, filter, lev) || bitap_match(num_entry->number, filter, lev);
 }
-bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
+
+// See https://stackoverflow.com/questions/70155565/generate-a-list-of-binary-numbers-where-n-bits-are-set-to-1 for details.
+SkipMask get_next_bit_permutation(SkipMask v) 
+{
+  SkipMask t = v | (v - 1);
+  return (t + 1) | (((~t & -~t) - 1) >> (__builtin_ctz(v) + 1));
+}
+
+// Kind of brute-force approach to finding similiar results with the -s parameter set.
+bool is_similiar_sep(const char* filter, const TelEntry* num_entry, int lev, SimiliarResult* res)
 {
     int filter_len = strlen(filter);
     if (filter_len > MAX_FILTER_LEN) {
@@ -236,7 +242,7 @@ bool is_similiar_sep(const char* filter, const char* name_num, const char* num_n
         while(!(current_permutation & (1 << filter_len)))
         {
             // Check for match with filter with given skip mask.
-            if (t9match_string_sep(filter, name_num, current_permutation) || t9match_string_sep(filter, num_num, current_permutation)) {
+            if (t9match_string_sep(filter, num_entry->name, current_permutation) || t9match_string_sep(filter, num_entry->number, current_permutation)) {
                 if (res != NULL) {
                     res->mask = current_permutation;
                     res->mistakes = mistakes;
@@ -251,6 +257,7 @@ bool is_similiar_sep(const char* filter, const char* name_num, const char* num_n
 
     return false;
 }
+
 // Print how filter looks with skip mask applied.
 void print_filter(const char* filter, int skip_mask)
 {
@@ -263,33 +270,43 @@ void print_filter(const char* filter, int skip_mask)
     }
     printf("\n");
 }
+
+// Just print similiar entry in wanted format.
 void print_entry_similiar(const TelEntry* t, const SimiliarResult* r)
 {
     print_entry(t);
+
+    // If the program was runned without the -s parameter, we won't get any more info about similiarity.
+    if (r->mistakes == -1)
+        return;
+    
     printf("    - mistakes: %i\n      skip mask: 0b", r->mistakes);
     int len = strlen(r->p_filter);
-    for (int i = 0; i < len; i++)
+    for (int i = 0; i < len; i++)       // Print mask in binary.
         printf("%d", (int)((r->mask & (1 << (len - i - 1))) != 0));
     printf("\n");
     printf("      matching filter: ");
     print_filter(r->p_filter, r->mask);
 } 
-int get_entry_from_stdin(TelEntry* out)
+
+// Read two lines from stdin and convert them into TelEntry.
+bool get_entry_from_stdin(TelEntry* out)
 {
     // Get name from stdin. If name was not read, then we have reached end of file or blank line.
     if (fgets(out->name, MAX_LINE_LEN, stdin) == NULL || strlen(out->name) == 1)
-        return -1;
+        return false;
     correct_line(out->name);
 
     // Get number from stdin.
     if (fgets(out->number, MAX_LINE_LEN, stdin) == NULL) {
         perr("error: Contact is missing number! Name: %s\n", out->name);
-        return -1;
+        return false;
     }
     correct_line(out->number);
 
-    return 0;
+    return true;
 }
+
 // Convert name and number to T9 strings.
 void entry_to_t9entry(const TelEntry* entry, TelEntry* out)
 {
@@ -298,6 +315,7 @@ void entry_to_t9entry(const TelEntry* entry, TelEntry* out)
     memset(out->number, 0, MAX_LINE_LEN);
     to_t9number(entry->number, out->number, MAX_LINE_LEN);
 }
+
 int print_matches_from_stdin(const char* filter, int lev, T9MatchFun is_match_fun, SimFun is_similiar_fun)
 {
     // We store a limited number of similiar results, as we print them only after we cannot find any match.
@@ -305,24 +323,20 @@ int print_matches_from_stdin(const char* filter, int lev, T9MatchFun is_match_fu
     static SimiliarResult sim_res_buf[MAX_SIM_ENTRIES];
     int n_sim = 0;
 
-    TelEntry t9_entry;
+    TelEntry entry, t9entry;
     int n_printed = 0;
-    while (true) 
+    while (get_entry_from_stdin(&entry)) 
     {
-        TelEntry t;
-        if (get_entry_from_stdin(&t) != 0)
-            break;
-        
         // Get entry in T9 format.
-        entry_to_t9entry(&t, &t9_entry);
+        entry_to_t9entry(&entry, &t9entry);
         
         // Print entry if it matches the current filter.
         SimiliarResult r;
-        if (is_match_fun(filter, t9_entry.name, TRY_ALL) || is_match_fun(filter, t9_entry.number, TRY_ALL)) {
-            print_entry(&t);
+        if (is_match_fun(filter, t9entry.name, TRY_ALL) || is_match_fun(filter, t9entry.number, TRY_ALL)) {
+            print_entry(&entry);
             n_printed++;
-        } else if (n_printed < 1 && lev > 0 && n_sim < MAX_SIM_ENTRIES && is_similiar_fun(filter, t9_entry.name, t9_entry.number, lev, &r)) {
-            sim_buf[n_sim] = t;
+        } else if (n_printed < 1 && lev > 0 && n_sim < MAX_SIM_ENTRIES && is_similiar_fun(filter, &t9entry, lev, &r)) {
+            sim_buf[n_sim] = entry;
             sim_res_buf[n_sim++] = r;
         }
     }
@@ -336,6 +350,7 @@ int print_matches_from_stdin(const char* filter, int lev, T9MatchFun is_match_fu
 
     return n_printed + n_sim;
 }
+
 void print_usage(const char* program_name)
 {
     perr("\n");
@@ -346,6 +361,7 @@ void print_usage(const char* program_name)
     perr("-l  - Maximum number of mistakes allowed\n");
     perr("-s  - Search for entries, that have any number of characters between filter matches.\n");
 }
+
 // Fitler should only consist of numbers.
 bool is_number(const char* filter)
 {
@@ -354,6 +370,8 @@ bool is_number(const char* filter)
            return false;
    return true;
 }
+
+// RIP getopt()
 bool parse_arguments(int argc, char** argv, char* filter, int* lev, bool* out_sep)
 {
     // By default the filter is ANY_FILTER
@@ -379,7 +397,7 @@ bool parse_arguments(int argc, char** argv, char* filter, int* lev, bool* out_se
             lev_arg = true;
         else if (strcmp(argv[i], "-s") == 0) {
             if (i != 1) {
-                perr("error: For some reason parameter -s must be the first parammeter.\n");
+                perr("error: For some reason -s must be a first parammeter.\n");
                 return false;
             }
             *out_sep = true;
