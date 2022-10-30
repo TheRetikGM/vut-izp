@@ -1,10 +1,16 @@
+/**
+ * Autor: Jakub Kloub
+ * Info:
+ *   - Program implementuje vsechny body zadani (nepovinny + premiovy a jejich kombinace).
+ *   - Pokud je parameter -s, tak se premiovy bod chova podle nepovinneho bodu.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
-#include <math.h>
-#include <limits.h>
+#include <math.h>       // pow
+#include <limits.h>     // CHAR_MAX
 
 #define MAX_LINE_LEN 100
 #define MAX_ENTRIES 50
