@@ -4,10 +4,12 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <limits.h>
 
 #define MAX_LINE_LEN 100
 #define MAX_ENTRIES 50
 #define MAX_FILTER_LEN 10   // Must be < 64 due to skip_mask being 64 bit number.
+#define MAX_EDIT_DIST 10
 #define ANY_FILTER "*"
 #define perr(msg, ...) fprintf(stderr, msg, ##__VA_ARGS__)
 #define TRY_ALL 0
@@ -165,55 +167,57 @@ SkipMask get_next_bit_permutation(SkipMask v)
   return (t + 1) | (((~t & -~t) - 1) >> (__builtin_ctz(v) + 1));
 }
 
-int min3(int a, int b, int c)
+// https://en.wikipedia.org/wiki/Bitap_algorithm
+const char* bitap_match(const char* text, const char* pattern, int lev)
 {
-    int min = a;
-    if (b < min)
-        min = b;
-    if (c < min)
-        min = c;
-    return min;
-}
-int min2(int a, int b) { return a < b ? a : b;}
-int get_edit_distance(const char* s1, const char* s2)
-{
-	// Maxmimum length of the string + 1 space for 0.
-	static int distances[MAX_LINE_LEN + 1][MAX_LINE_LEN + 1] = {};
-	int len1 = strlen(s1);
-	int len2 = strlen(s2);
+	const char* result = NULL;
+	int m = strlen(pattern);
+	unsigned long R[MAX_EDIT_DIST + 1];
+	unsigned long patternMask[CHAR_MAX + 1];
+	int i, d;
 
-	for (int i = 1; i <= len1; i++)
-		distances[i][0] = i;
-	for (int j = 1; j <= len2; j++)
-		distances[0][j] = j;
+	if (pattern[0] == '\0') 
+		return NULL;
+	if (m > 31)
+		return NULL; //Error: The pattern is too long!
 
-	int sub_cost = 0;
-	for (int j = 1; j <= len2; j++)
-	{
-		for (int i = 1; i <= len1; i++)
-		{
-			sub_cost = (int)(s1[i - 1] != s2[j - 1]);
-			distances[i][j] = min3(
-			        distances[i - 1][j] + 1, // Deletion.
-			        distances[i][j - 1] + 1, // Insertion.
-			        distances[i - 1][j - 1] + sub_cost); // Substitution.
+	memset(R, 0, MAX_EDIT_DIST * sizeof(unsigned long));
+	for (i = 0; i <= lev; ++i)
+		R[i] = ~1;
+
+	for (i = 0; i <= CHAR_MAX; ++i)
+		patternMask[i] = ~0;
+
+	for (i = 0; i < m; ++i)
+		patternMask[(int)pattern[i]] &= ~(1UL << i);
+
+	for (i = 0; text[i] != '\0'; ++i) {
+		unsigned long oldRd1 = R[0];
+		R[0] |= patternMask[(int)text[i]];
+		R[0] <<= 1;
+
+		for (d = 1; d <= lev; ++d) {
+			unsigned long tmp = R[d];
+			R[d] = (oldRd1 & (R[d] | patternMask[(int)text[i]])) << 1;
+			oldRd1 = tmp;
+		}
+
+		if (0 == (R[lev] & (1UL << m))) {
+			result = text + i - m + 1;
+			break;
 		}
 	}
 
-	return distances[len1][len2];
+	return result;
 }
+
 bool is_similiar(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
 {
-    int lev1 = get_edit_distance(filter, name_num);
-    int lev2 = get_edit_distance(filter, num_num);
-    int min_lev = min2(lev1, lev2);
-    
-    if (min_lev > lev)
-        return false;
-    res->mistakes = min2(lev1, lev2);
     res->p_filter = filter;
     res->mask = 0;
-
+    res->mistakes = -1;
+    if (!bitap_match(name_num, filter, lev) && !bitap_match(num_num, filter, lev))
+        return false;
     return true;
 }
 bool is_similiar_sep(const char* filter, const char* name_num, const char* num_num, int lev, SimiliarResult* res)
