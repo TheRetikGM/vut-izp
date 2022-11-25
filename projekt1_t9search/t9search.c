@@ -14,7 +14,7 @@
 
 #define MAX_LINE_LEN 100
 #define MAX_ENTRIES 50
-#define MAX_FILTER_LEN 10   // Must be < 64 due to skip_mask being 64 bit number.
+#define MAX_FILTER_LEN 63   // Must be < 64 due to skip_mask being 64 bit number.
 #define MAX_EDIT_DIST 10
 #define ANY_FILTER "*"
 #define perr(msg, ...) fprintf(stderr, msg, ##__VA_ARGS__)
