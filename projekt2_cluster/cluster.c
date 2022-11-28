@@ -188,7 +188,7 @@ int remove_cluster(struct cluster_t *carr, int narr, int idx)
 
   // Copy rest of the array one index closer.
   if (idx < narr - 1)
-    memcpy(carr + idx, carr + idx + 1, (narr - idx - 1) * sizeof(*carr));
+    memmove(carr + idx, carr + idx + 1, (narr - idx - 1) * sizeof(*carr));
 
   return narr - 1;
 }
