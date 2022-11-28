@@ -10,6 +10,7 @@
 #include <math.h> // sqrtf
 #include <limits.h> // INT_MAX
 #include <string.h> // memcpy
+#include <stdbool.h>
 
 /*****************************************************************
  * Ladici makra. Vypnout jejich efekt lze definici makra
@@ -40,10 +41,12 @@
 
 #endif
 
-#define perr(fmt, ...) fprintf(stderr, __FILE__ ":%i - error: " fmt, __LINE__, __VA_ARGS__)
+#define perr(fmt, ...) fprintf(stderr, __FILE__ ":%i - error: " fmt "\n", __LINE__, ##__VA_ARGS__)
+#define CHECK(expr, func, format, ...) if (!(expr)) { perr(format, ##__VA_ARGS__); return func; }
 #define CAPACITY_INCREASE 10
-// The maximum value X or Y coordinate can have.
+// Maximalni hodnota souradnic 
 #define MAX_XY_VALUE 1000
+#define IN_RANGE(v) (v > -MAX_XY_VALUE && v < MAX_XY_VALUE)
 
 /*****************************************************************
  * Deklarace potrebnych datovych typu:
@@ -99,7 +102,8 @@ void init_cluster(struct cluster_t *c, int cap)
  */
 void clear_cluster(struct cluster_t *c)
 {
-  assert(c->capacity == 0 || c->obj != NULL);
+  if (c->size == 0)
+    return;
 
   if (c->capacity > 0)
     free(c->obj);
@@ -301,6 +305,22 @@ void delete_clusters(struct cluster_t **arr, int n_clusters)
   free(*arr);
   *arr = NULL;
 }
+
+int load_cleanup(struct cluster_t **arr, int narr, FILE *fd)
+{
+  if (*arr != NULL)
+    delete_clusters(arr, narr);
+  fclose(fd);
+  return 0;
+} 
+bool is_unique_id(int id, struct cluster_t *arr, int first_n_elements)
+{
+  for (int i = 0; i < first_n_elements; i++)
+    for (int j = 0; j < arr[i].size; j++)
+      if (id == arr[i].obj[j].id)
+        return false;
+  return true;
+}
 /*
  Ze souboru 'filename' nacte objekty. Pro kazdy objekt vytvori shluk a ulozi
  jej do pole shluku. Alokuje prostor pro pole vsech shluku a ukazatel na prvni
@@ -311,7 +331,7 @@ void delete_clusters(struct cluster_t **arr, int n_clusters)
 int load_clusters(char *filename, struct cluster_t **arr)
 {
   assert(arr != NULL);
-  (void)arr;
+  *arr = NULL;
 
   FILE* fd = fopen(filename, "r");
   if (!fd) {
@@ -323,21 +343,24 @@ int load_clusters(char *filename, struct cluster_t **arr)
   // Pocet objektu ke cteni. 
   int n_obj = 0;
   fscanf(fd, "count=%i", &n_obj);
-  assert(n_obj != 0);
+  CHECK(n_obj > 0, load_cleanup(arr, 0, fd), "Invalid number of rows passed (%i).", n_obj);
   *arr = (struct cluster_t *) malloc(n_obj * sizeof(**arr));
+  CHECK(*arr != NULL, load_cleanup(arr, 0, fd), "Failed to allocate memory for cluster array.");
+  memset(*arr, 0, n_obj * sizeof(**arr));
   
+  int obj_id = 0, obj_x = 0, obj_y = 0;
+  char last_char = 0;
   for (int i = 0; i < n_obj; i++)
   {
-    int obj_id, obj_x, obj_y;
-    fscanf(fd, "%i %i %i", &obj_id, &obj_x, &obj_y);
+    int n_scanned = fscanf(fd, "%i %i %i%c", &obj_id, &obj_x, &obj_y, &last_char);
 
+    // Kontrola poctnu nactenych cisel v jedne radce.
+    CHECK(n_scanned == 4 && last_char == '\n', load_cleanup(arr, n_obj, fd), "Invalid row format.");
     // Rozsah souradic je dan v zadani. Ujistime se, ze v pripade chyby uvolnime dosud alokovanou pamet.
-    if (!(obj_x >= -1000 && obj_x <= 1000) || !(obj_y >= -1000 && obj_y <= 1000)) {
-      perr("Object coordinates are out of range. OBJID = %i, X = %i, Y = %i\n", obj_id, obj_x, obj_y);
-      delete_clusters(arr, i);
-      return 0;
-    }
-    
+    CHECK(IN_RANGE(obj_x) && IN_RANGE(obj_y), load_cleanup(arr, n_obj, fd), "Object coordinates are out of range. OBJID = %i, X = %i, Y = %i\n", obj_id, obj_x, obj_y);
+    // Kontrole unikatniho ID
+    CHECK(is_unique_id(obj_id, *arr, i), load_cleanup(arr, n_obj, fd), "ID is not unique! ID = %i", obj_id);
+
     init_cluster(*arr + i, CAPACITY_INCREASE);
     (*arr)[i].size = 1;
     (*arr)[i].obj->id = obj_id;
@@ -363,18 +386,36 @@ void print_clusters(struct cluster_t *carr, int narr)
   }
 }
 
+bool parse_arguments(int argc, char **argv, char **filename, int *n_clusters)
+{
+  if (argc == 1 || argc > 3)
+    return false;
+
+  *filename = argv[1];
+  if (argc == 3) {
+    char *perr = NULL;
+    *n_clusters = (int)strtol(argv[2], &perr, 10);
+
+    if (*perr != '\0')
+      return false;
+  } else {
+    *n_clusters = 1;
+  }
+
+  return true;
+}
+
 int main(int argc, char *argv[])
 {
   struct cluster_t *clusters = NULL;
 
-  if (argc != 3) {
-    fprintf(stderr, "error: Invalid number of arguments provided.");
+  char* filename = argv[1];
+  int n_wanted_clusters;
+
+  if (!parse_arguments(argc, argv, &filename, &n_wanted_clusters)) {
+    perr("Invalid arguments provided.");
     return EXIT_FAILURE;
   }
-
-  char* filename = argv[1];
-  int n_wanted_clusters = (int)strtol(argv[2], NULL, 10);
-  assert(n_wanted_clusters > 0);
 
   int n_loaded_clusters = load_clusters(filename, &clusters);
   if (clusters == NULL)

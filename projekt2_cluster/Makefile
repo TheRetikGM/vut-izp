@@ -5,5 +5,5 @@ all: cluster.c
 	${CC} ${C_FLAGS} cluster.c -o cluster
 
 clean:
-	rm -rf t9search
+	rm -rf cluster
 	rm -rf *.o
