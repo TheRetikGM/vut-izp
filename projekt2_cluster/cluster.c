@@ -41,12 +41,13 @@
 
 #endif
 
+// Vypise error hlasku do stderr.
 #define perr(fmt, ...) fprintf(stderr, __FILE__ ":%i - error: " fmt "\n", __LINE__, ##__VA_ARGS__)
-#define CHECK(expr, func, format, ...) if (!(expr)) { perr(format, ##__VA_ARGS__); return func; }
-#define CAPACITY_INCREASE 10
-// Maximalni hodnota souradnic 
+// Makro, ktere funguje jako assert, akorat s tim rozdilem, ze vypise error, spusti cleanup funkci a vrati navratovou hodnotu.
+#define CHECK(expr, func, ret, format, ...) if (!(expr)) { perr(format, ##__VA_ARGS__); func; return ret; }
+// Maximalni hodnota souradnice za zadani.
 #define MAX_XY_VALUE 1000
-#define IN_RANGE(v) (v > -MAX_XY_VALUE && v < MAX_XY_VALUE)
+#define IN_RANGE(v) (v >= 0 && v <= MAX_XY_VALUE)
 
 /*****************************************************************
  * Deklarace potrebnych datovych typu:
@@ -144,7 +145,7 @@ struct cluster_t *resize_cluster(struct cluster_t *c, int new_cap)
 void append_cluster(struct cluster_t *c, struct obj_t obj)
 {
   if (c->size + 1 > c->capacity)
-    resize_cluster(c, c->capacity + CAPACITY_INCREASE);
+    resize_cluster(c, c->capacity + CLUSTER_CHUNK);
   c->obj[c->size++] = obj;
 }
 
@@ -217,8 +218,10 @@ float cluster_distance(struct cluster_t *c1, struct cluster_t *c2)
   assert(c2 != NULL);
   assert(c2->size > 0);
 
-  // Take squared max distance, because our obj_distance function also returns squared distance.
+  // Pozor! Funkce obj_distance vraci ctvercovou vyzdalenost (obsah cverce nad preponou)
   float min_dist = (MAX_XY_VALUE * MAX_XY_VALUE) + 1;
+
+  // Najdeme nejmensi vzdalenost mezi vsemy elementy dvou clusteru.
   for (int i = 0; i < c1->size; i++)
     for (int j = 0; j < c2->size; j++) {
       float dist = obj_distance(c1->obj + i, c2->obj + j);
@@ -306,12 +309,11 @@ void delete_clusters(struct cluster_t **arr, int n_clusters)
   *arr = NULL;
 }
 
-int load_cleanup(struct cluster_t **arr, int narr, FILE *fd)
+void load_cleanup(struct cluster_t **arr, int narr, FILE *fd)
 {
   if (*arr != NULL)
     delete_clusters(arr, narr);
   fclose(fd);
-  return 0;
 } 
 bool is_unique_id(int id, struct cluster_t *arr, int first_n_elements)
 {
@@ -340,28 +342,32 @@ int load_clusters(char *filename, struct cluster_t **arr)
     return 0;
   }
 
-  // Pocet objektu ke cteni. 
+  // Nacteni poctu objektu ke cteni.
+  char last_char = 0;
   int n_obj = 0;
-  fscanf(fd, "count=%i", &n_obj);
-  CHECK(n_obj > 0, load_cleanup(arr, 0, fd), "Invalid number of rows passed (%i).", n_obj);
-  *arr = (struct cluster_t *) malloc(n_obj * sizeof(**arr));
-  CHECK(*arr != NULL, load_cleanup(arr, 0, fd), "Failed to allocate memory for cluster array.");
+  int count_scanned = fscanf(fd, "count=%i%c", &n_obj, &last_char);
+  CHECK(count_scanned != 0 && last_char == '\n', load_cleanup(arr, 0, fd), 0, "Count parameter is in invalid format.");
+  CHECK(n_obj > 0, load_cleanup(arr, 0, fd), 0, "Invalid number of rows passed (%i).", n_obj);
+
+  // Alokovani pameti pro vsechny clustery. Ke smazani je funkce delete_clusters().
+  *arr = (struct cluster_t *)malloc(n_obj * sizeof(**arr));
+  CHECK(*arr != NULL, load_cleanup(arr, 0, fd), 0, "Failed to allocate memory for cluster array.");
   memset(*arr, 0, n_obj * sizeof(**arr));
   
+  // Nacteni vsech bodu radek po radku.
   int obj_id = 0, obj_x = 0, obj_y = 0;
-  char last_char = 0;
   for (int i = 0; i < n_obj; i++)
   {
     int n_scanned = fscanf(fd, "%i %i %i%c", &obj_id, &obj_x, &obj_y, &last_char);
 
-    // Kontrola poctnu nactenych cisel v jedne radce.
-    CHECK(n_scanned == 4 && last_char == '\n', load_cleanup(arr, n_obj, fd), "Invalid row format.");
-    // Rozsah souradic je dan v zadani. Ujistime se, ze v pripade chyby uvolnime dosud alokovanou pamet.
-    CHECK(IN_RANGE(obj_x) && IN_RANGE(obj_y), load_cleanup(arr, n_obj, fd), "Object coordinates are out of range. OBJID = %i, X = %i, Y = %i\n", obj_id, obj_x, obj_y);
-    // Kontrole unikatniho ID
-    CHECK(is_unique_id(obj_id, *arr, i), load_cleanup(arr, n_obj, fd), "ID is not unique! ID = %i", obj_id);
+    // Kontrola poctu nactenych cisel v jedne radce.
+    CHECK(n_scanned == 4 && last_char == '\n', load_cleanup(arr, n_obj, fd), 0, "Invalid row format.");
+    // Kontrola rozsahu souradnic
+    CHECK(IN_RANGE(obj_x) && IN_RANGE(obj_y), load_cleanup(arr, n_obj, fd), 0, "Object coordinates are out of range. OBJID = %i, X = %i, Y = %i\n", obj_id, obj_x, obj_y);
+    // Kontrola unikatniho ID
+    CHECK(is_unique_id(obj_id, *arr, i), load_cleanup(arr, n_obj, fd), 0, "ID is not unique! ID = %i", obj_id);
 
-    init_cluster(*arr + i, CAPACITY_INCREASE);
+    init_cluster(*arr + i, CLUSTER_CHUNK);
     (*arr)[i].size = 1;
     (*arr)[i].obj->id = obj_id;
     (*arr)[i].obj->x = obj_x;
@@ -396,7 +402,7 @@ bool parse_arguments(int argc, char **argv, char **filename, int *n_clusters)
     char *perr = NULL;
     *n_clusters = (int)strtol(argv[2], &perr, 10);
 
-    if (*perr != '\0')
+    if (*perr != '\0' || *n_clusters < 1)
       return false;
   } else {
     *n_clusters = 1;
@@ -412,19 +418,29 @@ int main(int argc, char *argv[])
   char* filename = argv[1];
   int n_wanted_clusters;
 
+  // Parse arguments and print error if needed.
   if (!parse_arguments(argc, argv, &filename, &n_wanted_clusters)) {
     perr("Invalid arguments provided.");
     return EXIT_FAILURE;
   }
 
+  // Load clusters from file.
   int n_loaded_clusters = load_clusters(filename, &clusters);
   if (clusters == NULL)
     return EXIT_FAILURE;
 
+  // Pocet pozadovanych clusteru nesmi byt veci nez pocet bodu v souboru.
+  CHECK(n_loaded_clusters >= n_wanted_clusters, delete_clusters(&clusters, n_loaded_clusters), EXIT_FAILURE, "Number of wanted clusters is too high.");
+
+  // Define variables used in loop.
   int n_clusters = n_loaded_clusters, c1, c2;
+
   while (n_clusters > n_wanted_clusters) {
+    // Find two nearest clusters.
     find_neighbours(clusters, n_clusters, &c1, &c2);
+    // Merge second cluster into first.
     merge_clusters(clusters + c1, clusters + c2);
+    // Remove second cluster as it is no longer needed.
     n_clusters = remove_cluster(clusters, n_clusters, c2);
   }
 
