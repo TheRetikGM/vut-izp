@@ -1,4 +1,4 @@
-C_FLAGS=-Wall -Werror -Wextra -std=c99 -g -lm
+C_FLAGS=-std=c99 -Wall -Wextra -Werror -lm -g
 CC=gcc
 
 all: cluster.c

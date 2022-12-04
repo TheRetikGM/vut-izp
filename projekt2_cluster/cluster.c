@@ -11,6 +11,7 @@
 #include <limits.h> // INT_MAX
 #include <string.h> // memcpy
 #include <stdbool.h>
+#include <time.h> // time()
 
 /*****************************************************************
  * Ladici makra. Vypnout jejich efekt lze definici makra
@@ -74,6 +75,13 @@ struct cluster_t {
   struct obj_t *obj;
 };
 
+// Pro prenaseni argumentu programu.
+typedef struct prg_arg_t {
+  char  *filename;
+  int   n_clusters;
+  bool  k_means;
+} PrgArg;
+
 /*****************************************************************
  * Deklarace potrebnych funkci.
  *
@@ -111,7 +119,7 @@ void clear_cluster(struct cluster_t *c)
   init_cluster(c, 0);
 }
 
-/// Chunk of cluster objects. Value recommended for reallocation.
+// Chunk cluster objektu. Tato hodnota je doporucena pro realokaci.
 const int CLUSTER_CHUNK = 10;
 
 /*
@@ -144,8 +152,12 @@ struct cluster_t *resize_cluster(struct cluster_t *c, int new_cap)
  */
 void append_cluster(struct cluster_t *c, struct obj_t obj)
 {
-  if (c->size + 1 > c->capacity)
-    resize_cluster(c, c->capacity + CLUSTER_CHUNK);
+  if (c->size + 1 > c->capacity) {
+    if (resize_cluster(c, c->capacity + CLUSTER_CHUNK) == NULL) {
+      perr("Failed to resize cluster capacity.");
+      return;
+    }
+  }
   c->obj[c->size++] = obj;
 }
 
@@ -184,12 +196,16 @@ int remove_cluster(struct cluster_t *carr, int narr, int idx)
   assert(idx < narr);
   assert(narr > 0);
 
-  // Free objects in cluster to remove.
+  // Uvolni objekty v clusteru.
   clear_cluster(carr + idx);
 
-  // Copy rest of the array one index closer.
+  // Kopiruj zbytek pole od smazaneho clusteru o jeden index bliz.
+  //  - Timto nam vznikne jeden prazdny index na konci pole.
   if (idx < narr - 1)
     memmove(carr + idx, carr + idx + 1, (narr - idx - 1) * sizeof(*carr));  // Source and Dest overleap, so we have to use memmove, beacuse memcpy's behaivior is undefined.
+  
+  // Inicializuj posledni cluster jako prazdy.
+  init_cluster(carr + narr - 1, 0);
 
   return narr - 1;
 }
@@ -392,60 +408,74 @@ void print_clusters(struct cluster_t *carr, int narr)
   }
 }
 
-bool parse_arguments(int argc, char **argv, char **filename, int *n_clusters)
+bool parse_arguments(int argc, char **argv, PrgArg *args)
 {
-  if (argc == 1 || argc > 3)
+  // Brzky exit.
+  if (argc == 1 || argc > 4)
     return false;
 
-  *filename = argv[1];
-  if (argc == 3) {
+  // Parsni filename a cluster count.
+  args->filename = argv[1];
+  if (argc >= 3) {
     char *perr = NULL;
-    *n_clusters = (int)strtol(argv[2], &perr, 10);
+    args->n_clusters = (int)strtol(argv[2], &perr, 10);
 
-    if (*perr != '\0' || *n_clusters < 1)
+    if (*perr != '\0' || args->n_clusters < 1)
       return false;
   } else {
-    *n_clusters = 1;
+    args->n_clusters = 1;
   }
 
-  return true;
+  // Zkontroluj flag -k.
+  args->k_means = (argc == 4 && strcmp("-k", argv[3]) == 0);
+
+  return args->k_means || argc != 4;
 }
 
+// Metoda nejblizsiho souseda pro shlukovani clusteru.
+void nn_method(struct cluster_t *clusters, int narr, int n_wanted_clusters)
+{
+  // Ze zacatku jsou vsechny clustery ve svem clusteru.
+  int n_clusters = narr, c1, c2;
+  while (n_clusters > n_wanted_clusters) {
+    // Najdi dva nejbizsi clustery.
+    find_neighbours(clusters, n_clusters, &c1, &c2);
+    // Sluc druhy cluster do prvniho.
+    merge_clusters(clusters + c1, clusters + c2);
+    // Odstran druhy cluster, protoze ho uz nepotrebujeme.
+    n_clusters = remove_cluster(clusters, n_clusters, c2);
+  }
+}
+
+// Get index of the nearest centroid to point.
 int main(int argc, char *argv[])
 {
   struct cluster_t *clusters = NULL;
 
-  char* filename = argv[1];
-  int n_wanted_clusters;
-
-  // Parse arguments and print error if needed.
-  if (!parse_arguments(argc, argv, &filename, &n_wanted_clusters)) {
+  // Parse argumentu a vypis error pokud potreba.
+  PrgArg args;
+  if (!parse_arguments(argc, argv, &args)) {
     perr("Invalid arguments provided.");
     return EXIT_FAILURE;
   }
 
-  // Load clusters from file.
-  int n_loaded_clusters = load_clusters(filename, &clusters);
+  // Nacteni clusteru ze souboru.
+  int n_loaded_clusters = load_clusters(args.filename, &clusters);
   if (clusters == NULL)
     return EXIT_FAILURE;
 
   // Pocet pozadovanych clusteru nesmi byt veci nez pocet bodu v souboru.
-  CHECK(n_loaded_clusters >= n_wanted_clusters, delete_clusters(&clusters, n_loaded_clusters), EXIT_FAILURE, "Number of wanted clusters is too high.");
+  CHECK(n_loaded_clusters >= args.n_clusters, delete_clusters(&clusters, n_loaded_clusters), EXIT_FAILURE, "Number of wanted clusters is too high.");
 
-  // Define variables used in loop.
-  int n_clusters = n_loaded_clusters, c1, c2;
-
-  while (n_clusters > n_wanted_clusters) {
-    // Find two nearest clusters.
-    find_neighbours(clusters, n_clusters, &c1, &c2);
-    // Merge second cluster into first.
-    merge_clusters(clusters + c1, clusters + c2);
-    // Remove second cluster as it is no longer needed.
-    n_clusters = remove_cluster(clusters, n_clusters, c2);
+  if (n_loaded_clusters != args.n_clusters) {
+      nn_method(clusters, n_loaded_clusters, args.n_clusters);
+  }
+  else {
+    perr("k-means not impleneted yet.");
   }
 
-  print_clusters(clusters, n_clusters);
-  delete_clusters(&clusters, n_clusters);
+  print_clusters(clusters, args.n_clusters);
+  delete_clusters(&clusters, n_loaded_clusters);
 
   return EXIT_SUCCESS;
 }
